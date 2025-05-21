@@ -1,0 +1,17 @@
+{
+  "accountAssociation": {
+    "header": "eyJmaWQiOjE2MDk4LCJ0eXBlIjoiY3VzdG9keSIsImtleSI6IjB4YUIyMERlOGY1QTRmOGUxNDdCYWFDOUQxZjZlMjM2ODYxNDg1NTE2QSJ9",
+    "payload": "eyJkb21haW4iOiJ3YWxsY2FzdGVyLmxhdCJ9",
+    "signature": "MHg1NWIzMDkzMDkwNzNmNmE2ZjViNmViYzRkZDk2MDU5NDNkOTg0YTAxYzQyN2U5NjQwYzY1NDViOTcwMjM2MWFlMDBhMGRjODM0YWZmODE1YzQ3MmNhZTNiOWNhNDViYmQ2YzVlODMyZmMzNWEwM2RkNWQxNWU5MGNjNjBiMTUyYTFi"
+  },
+  "frame": {
+    "version": "1",
+    "name": "wallcaster",
+    "iconUrl": "https://wallcaster.lat/icon.png",
+    "homeUrl": "https://wallcaster.lat",
+    "imageUrl": "https://wallcaster.lat/image.png",
+    "buttonTitle": "write on wall",
+    "splashImageUrl": "https://wallcaster.lat/splash.png",
+    "splashBackgroundColor": "#000000"
+  }
+}

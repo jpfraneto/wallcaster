@@ -1,0 +1,6 @@
+{
+  "domain": "wallcaster",
+  "buildCommand": "npm run build",
+  "buildDir": "dist",
+  "siteId": "305b8929-bb98-43ac-9d76-7d074c6e190c"
+}
