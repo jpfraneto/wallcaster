@@ -6,22 +6,26 @@ import {
 } from "@solana/spl-token";
 import { jwtDecode } from "jwt-decode";
 
+import { useOwnedWall } from "./hooks/useWall";
+
+import { solanaConnection } from "./lib/solana/connection";
+
 import { BaseError, UserRejectedRequestError } from "viem";
 
 import { truncateAddress } from "./lib/truncateAddress";
 
 import {
-  Connection as SolanaConnection,
   PublicKey as SolanaPublicKey,
   SystemProgram as SolanaSystemProgram,
   Transaction as SolanaTransaction,
   VersionedTransaction,
   TransactionMessage,
+  TransactionInstruction,
+  PublicKey,
+  Connection,
 } from "@solana/web3.js";
 
 import sdk, {
-  AddMiniApp,
-  ComposeCast,
   FrameNotificationDetails,
   SignIn as SignInCore,
   type Context,
@@ -33,38 +37,50 @@ export default function App() {
   const [isSDKLoaded, setIsSDKLoaded] = useState(false);
   const [context, setContext] = useState<Context.FrameContext>();
   const [token, setToken] = useState<string | null>(null);
-  const [isContextOpen, setIsContextOpen] = useState(false);
-  const [txHash, setTxHash] = useState<string | null>(null);
 
-  const [added, setAdded] = useState(false);
   const [notificationDetails, setNotificationDetails] =
     useState<FrameNotificationDetails | null>(null);
 
-  const [lastEvent, setLastEvent] = useState("");
-
-  const [addFrameResult, setAddFrameResult] = useState("");
-  const [sendNotificationResult, setSendNotificationResult] = useState("");
   const [solanaAddress, setSolanaAddress] = useState<string | null>(null);
   const [solanaProvider, setSolanaProvider] = useState<any>(null);
   const [contextCastHash, setContextCastHash] = useState<string | null>(null);
   const [contextCastFid, setContextCastFid] = useState<Number | null>(null);
-  const [supplyAvailable, setSupplyAvailable] = useState(888);
-
   const [chosenWall, setChosenWall] = useState(0);
+  const [showActivateWall, setShowActivateWall] = useState(false);
 
   const [displayMarketplace, setDisplayMarketplace] = useState(true);
+
+  const PROGRAM_ID = "7UhisdAH7dosM1nfF1rbBXYv1Vtgr2yd6W4B7SuZJJVx";
+
+  const { wall, loading: wallLoading } = useOwnedWall(
+    solanaConnection,
+    PROGRAM_ID,
+    solanaAddress
+  );
 
   useEffect(() => {
     setNotificationDetails(context?.client.notificationDetails ?? null);
   }, [context]);
 
   useEffect(() => {
+    console.log(
+      notificationDetails,
+      contextCastHash,
+      contextCastFid,
+      wallLoading
+    );
+  }, []);
+
+  useEffect(() => {
     const load = async () => {
+      sdk.actions.ready({});
       const context = await sdk.context;
       setContext(context);
-      setAdded(context.client.added);
       const openedWhere = context.location?.type;
+      console.log("IN HERE THE CONTEXT IS", context);
+
       if (openedWhere === "cast_embed") {
+        setShowActivateWall(true);
         setContextCastHash(context.location?.cast.hash!);
         setContextCastFid(context.location?.cast.fid!);
       } else {
@@ -72,41 +88,9 @@ export default function App() {
         setContextCastFid(null);
       }
 
-      sdk.on("frameAdded", ({ notificationDetails }) => {
-        setLastEvent(
-          `frameAdded${!!notificationDetails ? ", notifications enabled" : ""}`
-        );
-
-        setAdded(true);
-        if (notificationDetails) {
-          setNotificationDetails(notificationDetails);
-        }
-      });
-
-      sdk.on("frameAddRejected", ({ reason }) => {
-        setLastEvent(`frameAddRejected, reason ${reason}`);
-      });
-
-      sdk.on("frameRemoved", () => {
-        setLastEvent("frameRemoved");
-        setAdded(false);
-        setNotificationDetails(null);
-      });
-
-      sdk.on("notificationsEnabled", ({ notificationDetails }) => {
-        setLastEvent("notificationsEnabled");
-        setNotificationDetails(notificationDetails);
-      });
-      sdk.on("notificationsDisabled", () => {
-        setLastEvent("notificationsDisabled");
-        setNotificationDetails(null);
-      });
-
       sdk.on("primaryButtonClicked", () => {
         console.log("primaryButtonClicked");
       });
-
-      sdk.actions.ready({});
     };
     if (sdk && !isSDKLoaded) {
       setIsSDKLoaded(true);
@@ -116,77 +100,6 @@ export default function App() {
       };
     }
   }, [isSDKLoaded]);
-
-  const openUrl = useCallback(() => {
-    sdk.actions.openUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
-  }, []);
-
-  const openWarpcastUrl = useCallback(() => {
-    sdk.actions.openUrl("https://warpcast.com/~/compose");
-  }, []);
-
-  const close = useCallback(() => {
-    sdk.actions.close();
-  }, []);
-
-  const addFrame = useCallback(async () => {
-    try {
-      setNotificationDetails(null);
-
-      const result = await sdk.actions.addFrame();
-
-      if (result.notificationDetails) {
-        setNotificationDetails(result.notificationDetails);
-      }
-      setAddFrameResult(
-        result.notificationDetails
-          ? `Added, got notificaton token ${result.notificationDetails.token} and url ${result.notificationDetails.url}`
-          : "Added, got no notification details"
-      );
-    } catch (error) {
-      if (error instanceof AddMiniApp.RejectedByUser) {
-        setAddFrameResult(`Not added: ${error.message}`);
-      }
-
-      if (error instanceof AddMiniApp.InvalidDomainManifest) {
-        setAddFrameResult(`Not added: ${error.message}`);
-      }
-
-      setAddFrameResult(`Error: ${error}`);
-    }
-  }, []);
-
-  const sendNotification = useCallback(async () => {
-    setSendNotificationResult("");
-    if (!notificationDetails || !context) {
-      return;
-    }
-
-    try {
-      const response = await fetch("/api/send-notification", {
-        method: "POST",
-        mode: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          fid: context.user.fid,
-          notificationDetails,
-        }),
-      });
-
-      if (response.status === 200) {
-        setSendNotificationResult("Success");
-        return;
-      } else if (response.status === 429) {
-        setSendNotificationResult("Rate limited");
-        return;
-      }
-
-      const data = await response.text();
-      setSendNotificationResult(`Error: ${data}`);
-    } catch (error) {
-      setSendNotificationResult(`Error: ${error}`);
-    }
-  }, [context, notificationDetails]);
 
   const { getSolanaProvider } = sdk.experimental;
   useEffect(() => {
@@ -303,16 +216,137 @@ export default function App() {
       {displayMarketplace && solanaAddress && (
         <Marketplace
           isOpen={displayMarketplace}
-          supplyAvailable={supplyAvailable}
           solanaProvider={solanaProvider}
           userSolanaAddress={solanaAddress}
         />
       )}
-      <ActiveWallsScroller
-        chosenWall={chosenWall}
-        setChosenWall={setChosenWall}
-      />
+      <ActiveWallsScroller setChosenWall={setChosenWall} />
+      {showActivateWall && (
+        <ActivateWallButton
+          wallPda={wall?.pda}
+          castHash={contextCastHash!}
+          connection={solanaConnection}
+          solanaProvider={solanaProvider}
+        />
+      )}
       {chosenWall && <Wall chosenWall={chosenWall} />}
+    </div>
+  );
+}
+
+// ————————————————————————————————————————————————————————————————
+// utils
+// ————————————————————————————————————————————————————————————————
+const ACTIVATE_WALL_DISCRIMINATOR = Buffer.from([
+  /* sha256("global:activate_wall").slice(0,8) */
+  88, 67, 119, 10, 202, 25, 16, 165,
+]);
+
+const to32ByteBuffer = (hex: string) => {
+  const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
+  return Buffer.from(clean.padStart(64, "0"), "hex");
+};
+
+// ————————————————————————————————————————————————————————————————
+// UI component
+// ————————————————————————————————————————————————————————————————
+function ActivateWallButton({
+  wallPda,
+  castHash,
+  connection,
+  solanaProvider,
+}: {
+  wallPda: PublicKey | undefined;
+  castHash: string;
+  connection: Connection;
+  solanaProvider: any;
+}) {
+  const [state, setState] = useState<
+    | { status: "idle" }
+    | { status: "sending" }
+    | { status: "success"; sig: string }
+    | { status: "error"; err: Error }
+  >({ status: "idle" });
+
+  const handleActivate = useCallback(async () => {
+    if (!wallPda) return;
+    setState({ status: "sending" });
+
+    try {
+      // 1️⃣ who is paying
+      const { publicKey } = await solanaProvider.request({ method: "connect" });
+      const payer = new PublicKey(publicKey as string);
+
+      // 2️⃣ build instruction
+      const ix = new TransactionInstruction({
+        keys: [
+          { pubkey: wallPda, isSigner: false, isWritable: true },
+          { pubkey: payer, isSigner: true, isWritable: false },
+        ],
+        programId: wallPda, // <— if your program id is fixed use new PublicKey(PROGRAM_ID)
+        data: Buffer.concat([
+          ACTIVATE_WALL_DISCRIMINATOR, // 8-byte discriminator
+          to32ByteBuffer(castHash), // 32-byte cast hash
+        ]),
+      });
+
+      // 3️⃣ assemble + send
+      const { blockhash } = await connection.getLatestBlockhash();
+      const tx = new SolanaTransaction().add(ix);
+      tx.recentBlockhash = blockhash;
+      tx.feePayer = payer;
+
+      const { signature } = await solanaProvider.signAndSendTransaction({
+        transaction: tx,
+        network: "mainnet-beta",
+      });
+
+      // 4️⃣ wait & finish
+      await connection.confirmTransaction(signature, "confirmed");
+      setState({ status: "success", sig: signature });
+    } catch (err) {
+      setState({ status: "error", err: err as Error });
+    }
+  }, [wallPda, castHash, connection, solanaProvider]);
+
+  // ———————————————————————————————————————————— UI
+  if (!wallPda) return null; // safety: nothing to activate
+  return (
+    <div className="fixed bottom-6 left-0 right-0 flex justify-center z-50">
+      {state.status === "idle" && (
+        <button
+          onClick={handleActivate}
+          className="px-6 py-3 bg-gradient-to-r from-emerald-500 to-cyan-600 text-white rounded-xl font-bold shadow-lg hover:scale-105 transition"
+        >
+          activate wall
+        </button>
+      )}
+
+      {state.status === "sending" && (
+        <button className="px-6 py-3 bg-gray-700 text-white rounded-xl animate-pulse cursor-wait">
+          activating…
+        </button>
+      )}
+
+      {state.status === "success" && (
+        <a
+          href={`https://solscan.io/tx/${state.sig}`}
+          target="_blank"
+          rel="noreferrer"
+          className="px-6 py-3 bg-green-600 text-white rounded-xl font-bold shadow-lg hover:underline"
+        >
+          wall activated ✓
+        </a>
+      )}
+
+      {state.status === "error" && (
+        <button
+          onClick={() => setState({ status: "idle" })}
+          className="px-6 py-3 bg-red-600 text-white rounded-xl font-bold shadow-lg"
+        >
+          retry – {state.err.message}
+        </button>
+      )}
     </div>
   );
 }
@@ -383,10 +417,8 @@ function Wall({ chosenWall }: { chosenWall: number }) {
 }
 
 function ActiveWallsScroller({
-  chosenWall,
   setChosenWall,
 }: {
-  chosenWall: number;
   setChosenWall: (wall: number) => void;
 }) {
   const [scrollPosition, setScrollPosition] = useState(0);
@@ -453,52 +485,90 @@ function ActiveWallsScroller({
 }
 function Marketplace({
   isOpen,
-  supplyAvailable,
   solanaProvider,
   userSolanaAddress,
 }: {
   isOpen: boolean;
-  supplyAvailable: number;
   solanaProvider: any;
   userSolanaAddress: string | null;
 }) {
-  // Dummy data for walls that are for sale
-  const walls = [
-    { id: 1, owner: "8vTH...4aMd", price: 0.5, state: "Listed" },
-    { id: 2, owner: "3jKm...9pQr", price: 1.2, state: "Listed" },
-    { id: 3, owner: "7xYz...2bCd", price: 0.8, state: "Listed" },
-    { id: 4, owner: "5sWv...1nMp", price: 2.0, state: "Listed" },
-    { id: 5, owner: "9qRs...6tUv", price: 1.5, state: "Listed" },
-    { id: 6, owner: "2aLk...8jHg", price: 0.7, state: "Listed" },
-    { id: 7, owner: "4dFe...3vBn", price: 1.8, state: "Listed" },
-    { id: 8, owner: "6gTy...7hJu", price: 1.0, state: "Listed" },
-  ];
+  const walls: any[] = []; // TODO: get walls from the contract
 
   const [mintStatus, setMintStatus] = useState<
     "idle" | "preparing" | "confirming" | "success" | "error"
   >("idle");
+  const [buyStatus, setBuyStatus] = useState<{
+    status: "idle" | "processing" | "success" | "error";
+    wallId: number | null;
+    message: string | null;
+  }>({ status: "idle", wallId: null, message: null });
   const [mintTxHash, setMintTxHash] = useState<string | null>(null);
+  const [buyTxHash, setBuyTxHash] = useState<string | null>(null);
   const [mintError, setMintError] = useState<string | null>(null);
-  const [localSupply, setLocalSupply] = useState(supplyAvailable);
+  const [localSupply, setLocalSupply] = useState<number | null>(null);
   const [confetti, setConfetti] = useState(false);
 
+  // Animation states
+  const [mintAnimation, setMintAnimation] = useState(false);
+  const [purchaseAnimation, setPurchaseAnimation] = useState(false);
+
   const PROGRAM_ID = "7UhisdAH7dosM1nfF1rbBXYv1Vtgr2yd6W4B7SuZJJVx";
-  const solanaConnection = new SolanaConnection(
-    "https://solana-mainnet.g.alchemy.com/v2/QvlfwedPVx_GZrUcJ64yA_A4HmoQkofN"
-  );
+
+  // Sound effects
+  const playSuccessSound = useCallback(() => {
+    const audio = new Audio("/sounds/success.mp3");
+    audio.volume = 0.5;
+    audio.play().catch((e) => console.log("Audio play failed:", e));
+  }, []);
+
+  const playErrorSound = useCallback(() => {
+    const audio = new Audio("/sounds/error.mp3");
+    audio.volume = 0.3;
+    audio.play().catch((e) => console.log("Audio play failed:", e));
+  }, []);
+
+  const playClickSound = useCallback(() => {
+    const audio = new Audio("/sounds/click.mp3");
+    audio.volume = 0.2;
+    audio.play().catch((e) => console.log("Audio play failed:", e));
+  }, []);
+
+  useEffect(() => {
+    console.log(
+      localSupply,
+      mintAnimation,
+      purchaseAnimation,
+      buyTxHash,
+      buyStatus
+    );
+  }, []);
 
   const handleBuyWallOnMarketplace = useCallback(
     async (wallId: number) => {
+      playClickSound();
       console.log("🔄 Buying wall", wallId);
       if (!solanaProvider) {
         console.log("🚫 No Solana wallet connected");
+        setBuyStatus({
+          status: "error",
+          wallId,
+          message:
+            "No Solana wallet connected. Please connect your wallet first.",
+        });
+        playErrorSound();
         return;
       }
 
       try {
         console.log("🔄 Preparing to buy wall...");
+        setBuyStatus({
+          status: "processing",
+          wallId,
+          message: "Preparing transaction...",
+        });
+        setPurchaseAnimation(true);
 
-        const wall = walls.find((w) => w.id === wallId);
+        const wall = walls && walls?.find((w) => w.id === wallId);
         if (!wall) {
           throw new Error("Wall not found");
         }
@@ -507,6 +577,20 @@ function Marketplace({
         const ourSolanaAddress = userSolanaAddress;
         if (!ourSolanaAddress) {
           throw new Error("Failed to fetch Solana address");
+        }
+
+        // Check user's SOL balance
+        const userPubkey = new SolanaPublicKey(ourSolanaAddress);
+        const balance = await solanaConnection.getBalance(userPubkey);
+        const solBalance = balance / 1000000000; // Convert lamports to SOL
+
+        if (solBalance < wall.price + 0.001) {
+          // Add buffer for fees
+          throw new Error(
+            `Insufficient SOL balance. You need at least ${
+              wall.price + 0.001
+            } SOL to buy this wall.`
+          );
         }
 
         const { blockhash } = await solanaConnection.getLatestBlockhash();
@@ -547,24 +631,64 @@ function Marketplace({
         transaction.recentBlockhash = blockhash;
         transaction.feePayer = buyerPubkey;
 
-        const { signature } = await solanaProvider.signAndSendTransaction({
-          transaction,
+        setBuyStatus({
+          status: "processing",
+          wallId,
+          message: "Waiting for wallet confirmation...",
         });
 
-        console.log(`🎉 Wall purchased! Transaction: ${signature}`);
+        const { signature } = await solanaProvider.signAndSendTransaction({
+          transaction: transaction
+            .serialize({
+              verifySignatures: false,
+              requireAllSignatures: false,
+            })
+            .toString("base64"),
+          network: "mainnet-beta",
+        });
 
-        // In a real app, you would update the UI to reflect the purchase
-      } catch (e) {
-        console.error("❌ Error buying wall:", e);
-        if (e instanceof Error) {
-          alert(`Failed to buy wall: ${e.message}`);
-        }
+        setBuyStatus({
+          status: "processing",
+          wallId,
+          message: "Transaction submitted, waiting for confirmation...",
+        });
+
+        console.log(`📨 Transaction sent with signature: ${signature}`);
+
+        // Wait for confirmation
+        await solanaConnection.confirmTransaction(signature);
+
+        setBuyTxHash(signature);
+        setBuyStatus({
+          status: "success",
+          wallId,
+          message: "Wall purchased successfully!",
+        });
+
+        // Trigger success effects
+        setConfetti(true);
+        playSuccessSound();
+        setTimeout(() => setConfetti(false), 5000);
+        setTimeout(() => setPurchaseAnimation(false), 1000);
+
+        console.log(`🎉 Wall purchased! Transaction: ${signature}`);
+      } catch (error) {
+        console.error("❌ Error buying wall:", error);
+        setPurchaseAnimation(false);
+        playErrorSound();
+        setBuyStatus({
+          status: "error",
+          wallId,
+          message:
+            error instanceof Error ? error.message : "Unknown error occurred",
+        });
       }
     },
-    [solanaProvider, walls]
+    [solanaProvider, walls, playClickSound, playSuccessSound, playErrorSound]
   );
 
   const mintNextWall = useCallback(async () => {
+    playClickSound();
     console.log("🔄 Minting next wall...");
     if (!solanaProvider) {
       console.log("🚫 No Solana wallet connected");
@@ -572,6 +696,7 @@ function Marketplace({
         "No Solana wallet connected. Please connect your wallet first."
       );
       setMintStatus("error");
+      playErrorSound();
       return;
     }
 
@@ -579,6 +704,7 @@ function Marketplace({
       console.log("🔄 Preparing to mint wall...");
       setMintStatus("preparing");
       setMintError(null);
+      setMintAnimation(true);
 
       const ourSolanaAddress = userSolanaAddress;
       console.log("THE USER SOLANA ADDRESS IS", userSolanaAddress);
@@ -594,7 +720,7 @@ function Marketplace({
 
       // Ensure user has enough SOL for the transaction
       if (solBalance < 0.006942) {
-        // Assuming 0.05 SOL is needed for the transaction
+        // Assuming 0.0069420 SOL is needed for the transaction
         throw new Error(
           "Insufficient SOL balance. You need at least 0.0069420 SOL to mint a wall."
         );
@@ -612,14 +738,10 @@ function Marketplace({
       );
       console.log("🔑 Registry PDA:", registryPda.toString());
 
-      // Create a transaction to mint a new wall
-      const transaction = new SolanaTransaction();
-      console.log("🔑 Transaction created");
-
       const registryAccount = await solanaConnection.getAccountInfo(
         registryPda
       );
-      if (!registryAccount) throw new Error("registry not initialised yet");
+      if (!registryAccount) throw new Error("Registry not initialized yet");
       console.log("🔑 Registry account:", registryAccount);
 
       const REGISTRY_OFFSET = 8 /*disc*/ + 32 /*authority*/ + 32; /*treasury*/
@@ -633,49 +755,43 @@ function Marketplace({
         "6nJXxD7VQJpnpE3tdWmM9VjTnC5mB2oREeWh5B6EHuzK"
       );
 
-      // wall PDA for “next” wall
+      // wall PDA for "next" wall
       const [wallPda] = SolanaPublicKey.findProgramAddressSync(
         [Buffer.from("wall"), registryPda.toBuffer(), mintCountBuf],
         programId
       );
       console.log("🔑 Wall PDA:", wallPda.toString());
 
-      const ix = {
+      console.log("🔑 Creating mint instruction");
+
+      const ix = new TransactionInstruction({
         keys: [
           { pubkey: registryPda, isSigner: false, isWritable: true },
-          { pubkey: wallPda, isSigner: false, isWritable: true }, // 👈 NEW
+          { pubkey: wallPda, isSigner: false, isWritable: true },
           { pubkey: treasuryPubkey, isSigner: false, isWritable: true },
-          { pubkey: fromPubkey, isSigner: true, isWritable: true }, // payer / owner
+          { pubkey: fromPubkey, isSigner: true, isWritable: true },
           {
             pubkey: SolanaSystemProgram.programId,
             isSigner: false,
             isWritable: false,
           },
         ],
-        programId: PROGRAM_ID,
-        data: Buffer.from([254, 62, 48, 58, 150, 117, 204, 141]), // mint_wall discriminator
-      };
-
-      console.log("🔑 Mint instruction:", ix);
-
-      transaction.add(ix as any);
-
-      console.log("➕ Added mint instruction to transaction");
-
-      // Set recent blockhash and fee payer
+        programId,
+        data: Buffer.from([254, 62, 48, 58, 150, 117, 204, 141]), // mint_wall
+      });
+      const tx = new SolanaTransaction().add(ix);
       const { blockhash } = await solanaConnection.getLatestBlockhash();
-      transaction.recentBlockhash = blockhash;
-      transaction.feePayer = fromPubkey;
-      console.log("⛓️ Set recent blockhash and fee payer");
+      console.log("🔑 Blockhash:", blockhash);
+      tx.recentBlockhash = blockhash;
+      tx.feePayer = fromPubkey;
 
-      // Sign and send the transaction
-      console.log("✍️ Signing and sending transaction...");
       setMintStatus("confirming");
-
       const { signature } = await solanaProvider.signAndSendTransaction({
-        transaction,
+        transaction: tx,
+        network: "mainnet-beta",
       });
 
+      console.log("➕ Added mint instruction to transaction");
       console.log(`📨 Transaction sent with signature: ${signature}`);
 
       // Wait for confirmation
@@ -685,21 +801,32 @@ function Marketplace({
 
       setMintTxHash(signature);
       setMintStatus("success");
-      setLocalSupply((prev) => Math.max(0, prev - 1));
-      console.log(`🧱 Wall minted! Supply remaining: ${localSupply - 1}`);
+      console.log(
+        `🧱 Wall minted! Supply remaining: ${(localSupply || 0) - 1}`
+      );
+      setLocalSupply((prev) => Math.max(0, (prev || 0) - 1));
 
-      // Trigger confetti effect
-      console.log("🎊 Triggering celebration confetti!");
+      // Trigger success effects
       setConfetti(true);
+      playSuccessSound();
       setTimeout(() => setConfetti(false), 5000);
+      setTimeout(() => setMintAnimation(false), 1000);
     } catch (error) {
       console.error("❌ Mint error:", error);
+      setMintAnimation(false);
+      playErrorSound();
       setMintError(
         error instanceof Error ? error.message : "Unknown error occurred"
       );
       setMintStatus("error");
     }
-  }, [solanaProvider, localSupply]);
+  }, [
+    solanaProvider,
+    localSupply,
+    playClickSound,
+    playSuccessSound,
+    playErrorSound,
+  ]);
 
   // Render different button states based on mint status
   const renderMintButton = () => {
@@ -814,7 +941,7 @@ function Marketplace({
 
       <div className="p-6 relative">
         <div className="absolute top-0 left-0 w-full h-full opacity-10 bg-[radial-gradient(circle_at_center,_rgba(255,255,255,0.8)_0%,_transparent_70%)]"></div>
-        {localSupply > 0 ? (
+        {localSupply && localSupply > 0 ? (
           <div className="flex flex-col items-center justify-center">
             <h2 className="text-3xl font-bold mb-6 text-transparent bg-clip-text bg-gradient-to-r from-pink-300 via-purple-300 to-indigo-400 relative z-10">
               {localSupply}/888 available
@@ -853,7 +980,7 @@ function Marketplace({
                     </span>
                   </div>
                   <div className="text-sm text-indigo-100">
-                    <p className="mb-2">Owner: FID {wall.owner}</p>
+                    <p className="mb-2">Owner: {truncateAddress(wall.owner)}</p>
                     <p className="font-medium text-lg text-yellow-200">
                       {wall.price} SOL
                     </p>
@@ -920,11 +1047,6 @@ function SignSolanaMessage() {
 }
 
 const jpsPhantomSolanaWallet = "6nJXxD7VQJpnpE3tdWmM9VjTnC5mB2oREeWh5B6EHuzK";
-
-const solanaConnection = new SolanaConnection(
-  "https://solana-mainnet.g.alchemy.com/v2/QvlfwedPVx_GZrUcJ64yA_A4HmoQkofN",
-  "confirmed"
-);
 
 function SendTokenSolana() {
   const [state, setState] = useState<
@@ -1423,6 +1545,7 @@ function SendSolana() {
   >({ status: "none" });
 
   const { getSolanaProvider } = sdk.experimental;
+
   const handleSend = useCallback(async () => {
     setState({ status: "pending" });
     try {
