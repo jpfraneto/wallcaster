@@ -7,6 +7,6 @@ import { nodePolyfills } from "vite-plugin-node-polyfills";
 export default defineConfig({
   plugins: [react(), tailwindcss(), nodePolyfills()],
   server: {
-    allowedHosts: ["poiesis.anky.bot", "wallcaster.lat"],
+    allowedHosts: ["wallcaster.lat", "miniapp.anky.app"],
   },
 });

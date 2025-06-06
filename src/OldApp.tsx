@@ -1,619 +1,1005 @@
-// src/App.tsx
-/* eslint-disable @typescript-eslint/ban-ts-comment */
-import { useState, useEffect, useMemo, useCallback } from "react";
-import { AlertCircle, ShoppingBag, X, Check, Tag } from "lucide-react";
+/* ──────────────────────────────────────────────────────────────
+ *  App.tsx – Fricks Frame v2 mini-app
+ *  "mint. activate. have fun."
+ * ──────────────────────────────────────────────────────────── */
+const API_URL = "https://poiesis.anky.app";
+
+import { useState, useEffect, useCallback, useRef } from "react";
+import sdk, { type Context } from "@farcaster/frame-sdk";
+import { Transaction, PublicKey } from "@solana/web3.js";
+import { motion, AnimatePresence } from "framer-motion";
+import axios from "axios";
+import StayTunedButton from "./components/ui/StayTunedButton";
+
 import {
-  Connection,
-  PublicKey,
-  SystemProgram,
-  LAMPORTS_PER_SOL,
-} from "@solana/web3.js";
-import { AnchorProvider, Program, BN } from "@project-serum/anchor";
-import { useAnchorWallet } from "@solana/wallet-adapter-react";
-import idl from "./idl/wallcaster.json";
-import sdk from "@farcaster/frame-sdk";
-import { Buffer } from "buffer";
+  useConnection as useSolanaConnection,
+  useWallet as useSolanaWallet,
+} from "@solana/wallet-adapter-react";
 
-// ──────────────────────────────────────────────────────────
-// Browser poly-fill (Anchor PDA helpers expect Buffer global)
-// ──────────────────────────────────────────────────────────
-if (!(window as any).Buffer) (window as any).Buffer = Buffer;
+import {
+  PROGRAM_ID,
+  TREASURY_PUBKEY,
+  registryPda,
+  ixMintWall,
+  ixActivateWall,
+} from "./lib/solana/wallcaster";
 
-// ──────────────────────────────────────────────────────────
-// Constants – change only if your on-chain values move
-// ──────────────────────────────────────────────────────────
-const RPC_ENDPOINT =
-  "https://solana-mainnet.g.alchemy.com/v2/QvlfwedPVx_GZrUcJ64yA_A4HmoQkofN";
-const PROGRAM_ID = new PublicKey(
-  "7UhisdAH7dosM1nfF1rbBXYv1Vtgr2yd6W4B7SuZJJVx"
-);
-const TREASURY = new PublicKey("6nJXxD7VQJpnpE3tdWmM9VjTnC5mB2oREeWh5B6EHuzK");
+import { useOwnedWall } from "./hooks/useWall";
+import { ActivatedWall } from "./types/Wall";
+import WallViewer from "./components/WallViewer";
+import { Button } from "./components/ui/Button";
+
 const TOTAL_SUPPLY = 888;
-// const MINT_PRICE_LAMPORTS = 6_900_000; // 0.0069 SOL
+const MINT_PRICE_SOL = "0.0069420";
 
-// ──────────────────────────────────────────────────────────
-// Type helpers
-// ──────────────────────────────────────────────────────────
-export interface WallAccount {
-  owner: PublicKey;
-  state: number;
-  price: BN;
-  castHash: Uint8Array; // 32 bytes
-}
-interface WallUI {
-  id: number;
-  pubkey: string;
+/* —— Add interface for inactive walls ——————————————— */
+interface InactiveWall {
+  pda: string;
   owner: string;
-  listed: boolean;
-  priceSol: number;
-  castHash: string;
+  displayName: string;
+  pfp: string | null;
 }
 
-// ──────────────────────────────────────────────────────────
-// Main component
-// ──────────────────────────────────────────────────────────
-const App = () => {
-  // 1.  Wallet / network / Anchor glue
-  const wallet = useAnchorWallet();
-  const connection = useMemo(
-    () => new Connection(RPC_ENDPOINT, "confirmed"),
-    []
-  );
-  const provider = useMemo(
-    () =>
-      wallet
-        ? new AnchorProvider(connection, wallet, { commitment: "confirmed" })
-        : null,
-    [connection, wallet]
-  );
-  const program = useMemo(
-    () => (provider ? new Program(idl as any, PROGRAM_ID, provider) : null),
-    [provider]
-  );
+interface WallStub {
+  id: number;
+  owner: string;
+  price: number;
+  state: "Listed";
+}
 
-  // 2.  PDA helpers
-  const registryPda = useMemo(
-    () =>
-      PublicKey.findProgramAddressSync(
-        [Buffer.from("registry")],
-        PROGRAM_ID
-      )[0],
-    []
-  );
+export default function App() {
+  /* Frame context */
+  const [isSDKLoaded, setIsSDKLoaded] = useState(false);
+  const [context, setContext] = useState<Context.FrameContext>();
+  const [_showActivate, setShowActivate] = useState(false);
+  const [castHashHex, setCastHashHex] = useState<string>();
+  const [userHasMinted, setUserHasMinted] = useState(false);
+  const [_walls, setWalls] = useState<WallStub[]>([]);
 
-  // 3.  UI state
-  const [loading, setLoading] = useState(false);
-  const [notification, setNotification] = useState<{
-    msg: string;
-    ok?: boolean;
-  } | null>(null);
-  const [registryMinted, setRegistryMinted] = useState<number>(0);
-  const [walls, setWalls] = useState<WallUI[]>([]);
-  const [market, setMarket] = useState<WallUI[]>([]);
-  const [showMarket, setShowMarket] = useState(false);
-  const [priceInput, setPriceInput] = useState("");
-  const [selectedWall, setSelectedWall] = useState<string | null>(null);
-  const [activeCastHash, setActiveCastHash] = useState<string>("");
+  const [activatedWalls, setActivatedWalls] = useState<ActivatedWall[]>([]);
+  const [_inactiveWalls, setInactiveWalls] = useState<InactiveWall[]>([]); // NEW!
+  const [chosenWallForOpening, setChosenWallForOpening] =
+    useState<ActivatedWall | null>(null);
+  const [_activationCastHash, setActivationCastHash] = useState<string>();
 
-  // 4.  Farcaster frame context (only needed once)
+  /* Supply tracking */
+  const [currentSupply, setCurrentSupply] = useState<number>(0);
+  const [totalInactiveWalls, setTotalInactiveWalls] = useState<number>(0); // NEW!
+  const [_loading, setLoading] = useState(true);
+  const [mintState, setMintState] = useState<
+    | { status: "none" }
+    | { status: "pending" }
+    | { status: "error"; error: Error }
+    | { status: "success"; signature: string }
+  >({ status: "none" });
+
+  /* UI state */
+  const [currentView, setCurrentView] = useState<
+    "gallery" | "mint" | "profile"
+  >("gallery");
+  const [_initialData, setInitialData] = useState<any>(null);
+
+  // Add state to track user's wall after minting
+  const [userWallState, setUserWallState] = useState<{
+    pda: string | null;
+    state: "Inactive" | "Active" | "Listed" | null;
+  }>({ pda: null, state: null });
+
+  /* Solana wallet integration - following official patterns */
+  const { publicKey, sendTransaction } = useSolanaWallet();
+  const { connection } = useSolanaConnection();
+  const solanaAddress = publicKey?.toBase58();
+
+  /* SDK initialization - following official pattern */
+  const apiCallMade = useRef(false);
+
+  const [walletBalance, setWalletBalance] = useState<number>(0);
+
+  /* Fetch wallet balance */
   useEffect(() => {
-    (async () => {
+    const fetchBalance = async () => {
+      if (!publicKey || !connection) return;
       try {
-        await sdk.actions.ready();
-        const ctx = await sdk.context;
-        if (ctx.location?.type === "cast_embed") {
-          setActiveCastHash(ctx.location.cast.hash);
-        }
-      } catch (e) {
-        console.error("Frame-SDK init error", e);
+        const balance = await connection.getBalance(publicKey);
+        setWalletBalance(balance / 1e9); // Convert lamports to SOL
+      } catch (error) {
+        console.error("Error fetching balance:", error);
       }
-    })();
-  }, []);
+    };
 
-  // 5.  Registry & wallet walls
-  const fetchRegistry = useCallback(async () => {
-    if (!program) return;
-    const data: any = await program.account.registry.fetch(registryPda);
-    setRegistryMinted(data.mintCount.toNumber());
-  }, [program, registryPda]);
+    fetchBalance();
+  }, [publicKey, connection]);
 
-  const fetchWalletWalls = useCallback(async () => {
-    if (!program || !wallet) return;
-    setLoading(true);
-    try {
-      const owned = await program.account.wall.all([
-        {
-          memcmp: {
-            offset: 8, // discriminator
-            bytes: wallet.publicKey.toBase58(),
-          },
-        },
-      ]);
-
-      setWalls(
-        owned.map((acc, i) => {
-          const w: WallAccount = acc.account as any;
-          return {
-            id: i,
-            pubkey: acc.publicKey.toBase58(),
-            owner: w.owner.toBase58(),
-            listed: w.state === 2,
-            priceSol: w.state === 2 ? w.price.toNumber() / LAMPORTS_PER_SOL : 0,
-            castHash: Buffer.from(w.castHash).toString("hex"),
-          };
-        })
-      );
-    } finally {
-      setLoading(false);
-    }
-  }, [program, wallet]);
-
-  const fetchMarket = useCallback(async () => {
-    if (!program) return;
-    setLoading(true);
-    try {
-      const all = await program.account.wall.all();
-      setMarket(
-        all
-          .filter((a) => (a.account as any).state === 2)
-          .map((acc, i) => {
-            const w: WallAccount = acc.account as any;
-            return {
-              id: i,
-              pubkey: acc.publicKey.toBase58(),
-              owner: w.owner.toBase58(),
-              listed: true,
-              priceSol: w.price.toNumber() / LAMPORTS_PER_SOL,
-              castHash: Buffer.from(w.castHash).toString("hex"),
-            };
-          })
-      );
-    } finally {
-      setLoading(false);
-    }
-  }, [program]);
-
-  // Refresh when program / wallet becomes ready
   useEffect(() => {
-    if (program) fetchRegistry();
-    if (wallet) fetchWalletWalls();
-  }, [program, wallet, fetchRegistry, fetchWalletWalls]);
+    const load = async () => {
+      const frameContext = await sdk.context;
+      setContext(frameContext);
+      if (!frameContext) return;
+      if (frameContext.user.fid && !apiCallMade.current) {
+        apiCallMade.current = true;
+        console.log("WE HAVE CONTEXT");
+        const response = await axios.get(
+          `${API_URL}/wallcaster/setup-app-for-fid/${frameContext.user.fid}?castHash=${castHashHex}&solanaAddress=${solanaAddress}&frameContext=${frameContext?.location?.type}`
+        );
+        const apiResponse = response.data;
+        console.log("the api response data is", apiResponse);
+        setInitialData(apiResponse.data);
+        setActivatedWalls(apiResponse.data.activatedWalls || []);
+        setInactiveWalls(apiResponse.data.inactiveWalls || []); // NEW!
+        setCurrentSupply(apiResponse.data.stats?.totalMinted || 0);
+        setTotalInactiveWalls(apiResponse.data.stats?.totalInactiveWalls || 0); // NEW!
 
-  // 6.  On-chain actions (mint / activate / list / unlist / buy)
-  const mintWall = useCallback(async () => {
-    if (!program || !wallet) return notify("Connect your wallet first");
-    setLoading(true);
+        // Set user wall state from API response
+        if (apiResponse.data.user?.wall) {
+          setUserWallState({
+            pda: apiResponse.data.user.wall.pda,
+            state: apiResponse.data.user.wall.state,
+          });
+        }
+      }
+
+      if (frameContext.location?.type === "cast_embed") {
+        setCastHashHex(frameContext.location.cast.hash);
+
+        // Only show activate if the current user is the cast author
+        if (frameContext.user.fid === frameContext.location.cast.fid) {
+          setShowActivate(true);
+        }
+      }
+
+      sdk.actions.ready({});
+    };
+
+    if (sdk && !isSDKLoaded) {
+      setIsSDKLoaded(true);
+      load();
+    }
+  }, [isSDKLoaded]);
+
+  /* Fetch current supply */
+  useEffect(() => {
+    const fetchSupplyAndWalls = async () => {
+      if (!connection) return;
+
+      try {
+        // Fetch current supply
+        const account = await connection.getAccountInfo(registryPda());
+        if (account) {
+          const mintCount = account.data.readUInt16LE(8 + 32 + 32);
+          setCurrentSupply(mintCount);
+        }
+
+        // For now, use demo walls - you can implement real wall fetching later
+        const demoWalls: WallStub[] = [];
+        setWalls(demoWalls);
+      } catch (err) {
+        console.error("Error fetching supply and walls:", err);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchSupplyAndWalls();
+  }, [connection, mintState]);
+
+  /* Derive PDA for the current user (if they own one) */
+  const { wall } = useOwnedWall(
+    connection,
+    PROGRAM_ID.toBase58(),
+    solanaAddress ?? null
+  );
+
+  // Helper function to derive wall PDA from registry and mint count
+  const deriveUserWallPda = useCallback(async () => {
+    if (!publicKey || !connection) return null;
+
     try {
-      const wallIdx = registryMinted;
-      const [wallPda] = PublicKey.findProgramAddressSync(
+      const registryAccount = await connection.getAccountInfo(registryPda());
+      if (!registryAccount) return null;
+
+      const mintCount = registryAccount.data.readUInt16LE(8 + 32 + 32);
+
+      // The user's wall would be at the current mint count (since they just minted)
+      const [wallPda] = await PublicKey.findProgramAddress(
         [
           Buffer.from("wall"),
-          registryPda.toBuffer(),
-          new BN(wallIdx).toArrayLike(Buffer, "le", 8),
+          registryPda().toBuffer(),
+          Buffer.from([mintCount & 0xff, (mintCount >> 8) & 0xff]), // Convert to little endian bytes
         ],
         PROGRAM_ID
       );
 
-      await program.methods
-        .mintWall()
-        .accounts({
-          registry: registryPda,
-          wall: wallPda,
-          treasury: TREASURY,
-          payer: wallet.publicKey,
-          systemProgram: SystemProgram.programId,
-        })
-        .rpc({ commitment: "confirmed" });
+      return wallPda.toBase58();
+    } catch (error) {
+      console.error("Error deriving wall PDA:", error);
+      return null;
+    }
+  }, [publicKey, connection]);
 
-      notify(`Wall #${wallIdx} minted (0.0069 SOL)`, true);
-      fetchRegistry();
-      fetchWalletWalls();
-    } catch (e: any) {
-      notify(e.message || "Mint failed");
-    } finally {
-      setLoading(false);
+  /* Mint function - following official transaction pattern */
+  const mint = useCallback(async () => {
+    if (!publicKey || !connection) {
+      setMintState({
+        status: "error",
+        error: new Error("Wallet not connected"),
+      });
+      return;
+    }
+
+    // Check if user already owns a wall (smart contract level)
+    if (wall?.pda || userWallState.pda) {
+      setMintState({
+        status: "error",
+        error: new Error(
+          "You already own a wall! Each wallet can only mint one wall."
+        ),
+      });
+      return;
+    }
+
+    // Check localStorage (client level)
+    if (userHasMinted) {
+      setMintState({
+        status: "error",
+        error: new Error("You have already minted a wall with this wallet."),
+      });
+      return;
+    }
+
+    setMintState({ status: "pending" });
+
+    try {
+      // Check if sold out
+      if (currentSupply >= TOTAL_SUPPLY) {
+        throw new Error("All 888 walls have been minted!");
+      }
+
+      /* Fetch registry to know current mint_count */
+      const account = await connection.getAccountInfo(registryPda());
+      if (!account) throw new Error("Registry not initialized");
+
+      const mintCount = account.data.readUInt16LE(8 + 32 + 32);
+
+      /* Get latest blockhash */
+      const { blockhash } = await connection.getLatestBlockhash();
+      if (!blockhash) {
+        throw new Error("Failed to fetch latest Solana blockhash");
+      }
+
+      /* Create transaction following official pattern */
+      const transaction = new Transaction();
+
+      // Add mint instruction
+      const mintInstruction = ixMintWall(publicKey, TREASURY_PUBKEY, mintCount);
+      transaction.add(mintInstruction);
+
+      transaction.recentBlockhash = blockhash;
+      transaction.feePayer = publicKey;
+
+      /* Send transaction */
+      const signature = await sendTransaction(transaction, connection);
+
+      // Wait for confirmation to ensure the mint completed
+      const confirmation = await connection.confirmTransaction(signature);
+
+      if (confirmation.value.err) {
+        throw new Error(`Transaction failed: ${confirmation.value.err}`);
+      }
+
+      // Derive the PDA of the newly minted wall
+      const newWallPda = await deriveUserWallPda();
+
+      // Update user wall state immediately after successful mint
+      setUserWallState({
+        pda: newWallPda,
+        state: "Inactive", // Newly minted walls are always Inactive
+      });
+
+      // Mark user as having minted in localStorage
+      const mintKey = `wallcaster_minted_${publicKey.toBase58()}`;
+      localStorage.setItem(mintKey, "true");
+      setUserHasMinted(true);
+
+      // Update current supply
+      setCurrentSupply((prev) => prev + 1);
+
+      setMintState({ status: "success", signature });
+
+      // Auto-switch to gallery view to show the activate button
+      setTimeout(() => {
+        setCurrentView("gallery");
+      }, 2000);
+    } catch (error: any) {
+      console.error("Mint error:", error);
+      setMintState({
+        status: "error",
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
     }
   }, [
-    program,
-    wallet,
-    registryMinted,
-    registryPda,
-    fetchRegistry,
-    fetchWalletWalls,
+    publicKey,
+    sendTransaction,
+    connection,
+    currentSupply,
+    wall,
+    userHasMinted,
+    userWallState.pda,
+    deriveUserWallPda,
   ]);
 
-  const activateWall = useCallback(
-    async (wallPk: string) => {
-      if (!program || !wallet) return notify("Connect your wallet first");
-      if (!activeCastHash)
-        return notify("Open the mini-app from the cast you want as hash");
-      setLoading(true);
-      try {
-        await program.methods
-          .activateWall(activeCastHash)
-          .accounts({
-            wall: new PublicKey(wallPk),
-            owner: wallet.publicKey,
-          })
-          .rpc({ commitment: "confirmed" });
+  // Add activation state tracking
+  const [activationState, setActivationState] = useState<
+    | { status: "idle" }
+    | { status: "creating_cast" }
+    | { status: "pending_activation" }
+    | { status: "success"; signature: string }
+    | { status: "error"; error: string }
+  >({ status: "idle" });
 
-        notify("Wall activated 🎉", true);
-        fetchWalletWalls();
-      } catch (e: any) {
-        notify(e.message || "Activation failed");
-      } finally {
-        setLoading(false);
+  // Add analytics tracking for activation attempts
+  useEffect(() => {
+    if (activationState.status !== "idle") {
+      console.log("Activation State Change:", {
+        status: activationState.status,
+        userWallet: solanaAddress,
+        timestamp: Date.now(),
+        error:
+          activationState.status === "error" ? activationState.error : null,
+      });
+    }
+  }, [activationState, solanaAddress]);
+
+  const handleActivateWall = useCallback(
+    async (castHash: string) => {
+      const wallToActivate = wall?.pda || userWallState.pda;
+
+      if (!publicKey || !connection || !wallToActivate) {
+        setActivationState({
+          status: "error",
+          error: "Wallet not connected or no wall found",
+        });
+        return;
+      }
+
+      setActivationState({ status: "pending_activation" });
+
+      try {
+        console.log("🎯 Starting wall activation...");
+        console.log("Wall PDA:", wallToActivate);
+        console.log("Cast Hash:", castHash);
+        console.log("Owner:", publicKey.toString());
+
+        // Validate inputs
+        if (!wallToActivate || !castHash) {
+          throw new Error("Missing wall PDA or cast hash");
+        }
+
+        // Convert wall PDA string to PublicKey
+        const wallPublicKey = new PublicKey(wallToActivate);
+
+        // Verify the wall account exists and is owned by our program
+        const wallAccount = await connection.getAccountInfo(wallPublicKey);
+        if (!wallAccount) {
+          throw new Error("Wall account not found");
+        }
+
+        if (!wallAccount.owner.equals(PROGRAM_ID)) {
+          throw new Error(
+            `Wall account not owned by program. Owner: ${wallAccount.owner.toString()}, Expected: ${PROGRAM_ID.toString()}`
+          );
+        }
+
+        console.log("✅ Wall account verified");
+
+        // Check current wall state to ensure it's inactive
+        const wallData = wallAccount.data;
+        const stateOffset = 8 + 32 + 32 + 8; // discriminator + owner + cast_hash + price
+        const currentState = wallData[stateOffset];
+
+        console.log("Current wall state:", currentState);
+
+        if (currentState === 1) {
+          throw new Error("Wall is already activated");
+        }
+
+        if (currentState === 2) {
+          throw new Error("Wall is listed - cannot activate while listed");
+        }
+
+        // Verify ownership
+        const ownerBytes = wallData.slice(8, 8 + 32); // Skip discriminator, get owner
+        const wallOwner = new PublicKey(ownerBytes);
+
+        if (!wallOwner.equals(publicKey)) {
+          throw new Error(
+            `You don't own this wall. Owner: ${wallOwner.toString()}, You: ${publicKey.toString()}`
+          );
+        }
+
+        console.log("✅ Ownership verified");
+
+        // Clean the cast hash (remove 0x prefix if present)
+        const cleanCastHash = castHash.startsWith("0x")
+          ? castHash.slice(2)
+          : castHash;
+
+        // Validate hex string
+        if (!/^[0-9a-fA-F]+$/.test(cleanCastHash)) {
+          throw new Error(`Invalid cast hash format: ${castHash}`);
+        }
+
+        console.log("✅ Cast hash validated:", cleanCastHash);
+
+        // Get latest blockhash
+        const { blockhash, lastValidBlockHeight } =
+          await connection.getLatestBlockhash();
+
+        // Create the activation instruction
+        const activateInstruction = ixActivateWall(
+          wallPublicKey,
+          publicKey,
+          castHash // Pass the original hex string
+        );
+
+        console.log("🔧 Activation instruction created");
+
+        // Create transaction
+        const transaction = new Transaction();
+        transaction.add(activateInstruction);
+        transaction.recentBlockhash = blockhash;
+        transaction.feePayer = publicKey;
+
+        console.log("🔍 Simulating transaction...");
+
+        // Simulate the transaction first
+        const simulation = await connection.simulateTransaction(transaction);
+
+        if (simulation.value.err) {
+          console.error("❌ Simulation failed:", simulation.value.err);
+          console.error("Simulation logs:", simulation.value.logs);
+
+          // Parse custom program errors
+          if (
+            simulation.value.err &&
+            typeof simulation.value.err === "object" &&
+            "InstructionError" in simulation.value.err
+          ) {
+            const instructionError = simulation.value.err.InstructionError;
+            if (
+              Array.isArray(instructionError) &&
+              instructionError.length > 1
+            ) {
+              const errorCode = instructionError[1];
+              if (typeof errorCode === "object" && "Custom" in errorCode) {
+                const customError = errorCode.Custom;
+
+                const errorMessages: { [key: number]: string } = {
+                  6000: "All 888 walls are minted",
+                  6001: "Wall is already listed",
+                  6002: "Wall is not listed",
+                  6003: "Price must be > 0",
+                  6004: "Cannot buy your own listing",
+                  6005: "Seller provided is not the owner",
+                  6006: "Insufficient funds",
+                  6007: "Royalty overflow",
+                  6008: "Wall is listed – unlist first",
+                };
+
+                const errorMessage =
+                  errorMessages[customError] ||
+                  `Unknown error code: ${customError}`;
+                throw new Error(`Smart contract error: ${errorMessage}`);
+              }
+            }
+          }
+
+          throw new Error(
+            `Transaction simulation failed: ${JSON.stringify(
+              simulation.value.err
+            )}`
+          );
+        }
+
+        console.log("✅ Simulation successful");
+        console.log("Simulation logs:", simulation.value.logs);
+
+        // Send transaction
+        console.log("📤 Sending activation transaction...");
+        const signature = await sendTransaction(transaction, connection, {
+          maxRetries: 3,
+        });
+
+        console.log("📝 Transaction sent:", signature);
+
+        // Wait for confirmation
+        const confirmation = await connection.confirmTransaction({
+          signature,
+          blockhash,
+          lastValidBlockHeight,
+        });
+
+        if (confirmation.value.err) {
+          throw new Error(`Transaction failed: ${confirmation.value.err}`);
+        }
+
+        // Update user wall state to Active
+        setUserWallState((prev) => ({
+          ...prev,
+          state: "Active",
+        }));
+
+        console.log("🎉 Wall activated successfully!");
+        setActivationState({ status: "success", signature });
+      } catch (error: any) {
+        console.error("❌ Activation failed:", error);
+        setActivationState({
+          status: "error",
+          error: error.message || "Unknown error occurred",
+        });
       }
     },
-    [program, wallet, activeCastHash, fetchWalletWalls]
+    [publicKey, connection, wall, userWallState.pda, sendTransaction]
   );
 
-  const listWall = useCallback(
-    async (wallPk: string, priceSol: number) => {
-      if (!program || !wallet) return notify("Connect your wallet first");
-      setLoading(true);
-      try {
-        await program.methods
-          .listWall(new BN(priceSol * LAMPORTS_PER_SOL))
-          .accounts({
-            wall: new PublicKey(wallPk),
-            owner: wallet.publicKey,
-          })
-          .rpc({ commitment: "confirmed" });
+  // Handle the complete activation flow: cast creation + activation
+  const initiateActivation = useCallback(async () => {
+    setActivationState({ status: "creating_cast" });
 
-        notify(`Listed for ${priceSol} SOL`, true);
-        fetchWalletWalls();
-      } catch (e: any) {
-        notify(e.message || "Listing failed");
-      } finally {
-        setLoading(false);
+    try {
+      console.log("📝 Creating activation cast...");
+
+      const activationCast = await sdk.actions.composeCast({
+        text: "this cast will be my frick 🧱✨",
+        embeds: ["https://fricks.lat"],
+      });
+
+      console.log("✅ Cast created:", activationCast.cast?.hash);
+
+      // Store the cast hash
+      setActivationCastHash(activationCast.cast?.hash || "");
+
+      // Now activate the wall with this cast hash
+      await handleActivateWall(activationCast.cast?.hash || "");
+    } catch (error: any) {
+      console.error("❌ Cast creation failed:", error);
+      setActivationState({
+        status: "error",
+        error: `Failed to create cast: ${error.message}`,
+      });
+    }
+  }, [handleActivateWall]);
+
+  // const writeOnWall = useCallback((wall: ActivatedWall) => {
+  //   sdk.actions.composeCast({
+  //     parent: {
+  //       type: "cast",
+  //       hash: wall.castHash,
+  //     },
+  //     text: `sup ${wall.username}`,
+  //   });
+  // }, []);
+
+  /* ——————————————————— render ——————————————————— */
+  if (!isSDKLoaded) return splash("Loading SDK…");
+  if (!solanaAddress) return splash("load this inside warpcast");
+
+  const isSoldOut = currentSupply >= TOTAL_SUPPLY;
+
+  // Updated logic to include userWallState
+  const userOwnsWall = wall?.pda || userWallState.pda;
+  const userWallIsInactive =
+    wall?.state === "Inactive" || userWallState.state === "Inactive";
+  const canMint = !userOwnsWall && !userHasMinted && !isSoldOut;
+
+  // Determine primary action for bottom button
+  const getPrimaryAction = () => {
+    if (currentView === "gallery") {
+      if (canMint) {
+        return {
+          text: "MINT YOUR WALL",
+          action: () => setCurrentView("mint"),
+          color: "bg-purple-600 hover:bg-purple-700",
+        };
+      } else if (userOwnsWall && userWallIsInactive) {
+        return {
+          text:
+            activationState.status === "creating_cast"
+              ? "CREATING CAST..."
+              : activationState.status === "pending_activation"
+              ? "ACTIVATING..."
+              : "ACTIVATE YOUR WALL",
+          action: initiateActivation,
+          color: "bg-green-600 hover:bg-green-700",
+          disabled:
+            activationState.status === "creating_cast" ||
+            activationState.status === "pending_activation",
+        };
+      } else if (userOwnsWall) {
+        return {
+          text: "VIEW YOUR FRICK",
+          action: () => setCurrentView("profile"),
+          color: "bg-blue-600 hover:bg-blue-700",
+        };
+      } else {
+        return {
+          text: "EXPLORE COMMUNITY",
+          action: () => {
+            // Maybe scroll to top or refresh
+          },
+          color: "bg-gray-600 hover:bg-gray-700",
+        };
       }
-    },
-    [program, wallet, fetchWalletWalls]
-  );
-
-  const unlistWall = useCallback(
-    async (wallPk: string) => {
-      if (!program || !wallet) return notify("Connect your wallet first");
-      setLoading(true);
-      try {
-        await program.methods
-          .unlistWall()
-          .accounts({
-            wall: new PublicKey(wallPk),
-            owner: wallet.publicKey,
-            treasury: TREASURY,
-            systemProgram: SystemProgram.programId,
-          })
-          .rpc({ commitment: "confirmed" });
-
-        notify("Unlisted (8 % fee charged)", true);
-        fetchWalletWalls();
-      } catch (e: any) {
-        notify(e.message || "Unlist failed");
-      } finally {
-        setLoading(false);
+    } else if (currentView === "mint") {
+      if (walletBalance < 0.006942) {
+        return {
+          text: "GET SOL TO MINT",
+          action: () => {
+            sdk.actions.swapToken({
+              sellToken: "",
+              buyToken: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp/slip44:501",
+              sellAmount: "69420000000",
+            });
+          },
+          color: "bg-yellow-600 hover:bg-yellow-700",
+        };
+      } else {
+        return {
+          text: mintState.status === "pending" ? "MINTING..." : "MINT NOW",
+          action: mint,
+          color: "bg-purple-600 hover:bg-purple-700",
+          disabled: mintState.status === "pending",
+        };
       }
-    },
-    [program, wallet, fetchWalletWalls]
-  );
-
-  const buyWall = useCallback(
-    async (wall: WallUI) => {
-      if (!program || !wallet) return notify("Connect your wallet first");
-      setLoading(true);
-      try {
-        await program.methods
-          .buyWall()
-          .accounts({
-            wall: new PublicKey(wall.pubkey),
-            seller: new PublicKey(wall.owner),
-            buyer: wallet.publicKey,
-            treasury: TREASURY,
-            systemProgram: SystemProgram.programId,
-          })
-          .rpc({ commitment: "confirmed" });
-
-        notify(`Bought for ${wall.priceSol} SOL`, true);
-        fetchWalletWalls();
-        fetchMarket();
-      } catch (e: any) {
-        notify(e.message || "Buy failed");
-      } finally {
-        setLoading(false);
-      }
-    },
-    [program, wallet, fetchWalletWalls, fetchMarket]
-  );
-
-  // 7.  Helpers
-  const notify = (msg: string, ok = false) => {
-    setNotification({ msg, ok });
-    setTimeout(() => setNotification(null), 5_000);
+    } else {
+      // profile view
+      return {
+        text: "BACK TO GALLERY",
+        action: () => setCurrentView("gallery"),
+        color: "bg-gray-600 hover:bg-gray-700",
+      };
+    }
   };
 
-  // ────────────────────────────────────────────────────────
-  // UI
-  // ────────────────────────────────────────────────────────
-  if (!wallet)
-    return (
-      <ScreenCenter>
-        <p className="mb-6 text-gray-600">your cozy corner on the internet</p>
-      </ScreenCenter>
-    );
+  const primaryAction = getPrimaryAction();
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <Header
-        toggleMarket={() => {
-          if (!showMarket) fetchMarket();
-          setShowMarket(!showMarket);
-        }}
-      />
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.5 }}
+      className="h-screen w-screen flex flex-col bg-gray-900 text-white overflow-hidden"
+      style={{
+        paddingTop: context?.client.safeAreaInsets?.top ?? 0,
+        paddingBottom: context?.client.safeAreaInsets?.bottom ?? 0,
+        paddingLeft: context?.client.safeAreaInsets?.left ?? 0,
+        paddingRight: context?.client.safeAreaInsets?.right ?? 0,
+      }}
+    >
+      {/* Wall Viewer Modal */}
+      {chosenWallForOpening && (
+        <WallViewer
+          wall={chosenWallForOpening}
+          onClose={() => setChosenWallForOpening(null)}
+        />
+      )}
 
-      <main className="max-w-lg mx-auto p-4">
-        {notification && (
-          <Toast ok={notification.ok} onClose={() => setNotification(null)}>
-            {notification.msg}
-          </Toast>
-        )}
+      {/* Main Content Area */}
+      <div className="flex-1 mb-20 overflow-y-auto">
+        <AnimatePresence mode="wait">
+          {currentView === "gallery" && (
+            <motion.div
+              key="gallery"
+              initial={{ opacity: 0, x: -20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 20 }}
+              transition={{ duration: 0.3 }}
+              className="p-6 space-y-6"
+            >
+              {/* Header */}
+              <div className="text-center space-y-2">
+                <motion.h1
+                  className="text-4xl font-bold"
+                  animate={{
+                    background: [
+                      "linear-gradient(45deg, #ffffff, #a855f7)",
+                      "linear-gradient(45deg, #a855f7, #06b6d4)",
+                      "linear-gradient(45deg, #06b6d4, #ffffff)",
+                    ],
+                  }}
+                  transition={{ duration: 3, repeat: Infinity }}
+                  style={{
+                    backgroundClip: "text",
+                    WebkitBackgroundClip: "text",
+                    color: "white",
+                  }}
+                  onClick={() => {
+                    sdk.actions.swapToken({
+                      buyToken:
+                        "eip155:8453/erc20:0xaeB9e71B11BD3ECb03897de7534F9dc33D9e6b07",
+                    });
+                  }}
+                >
+                  $fricks
+                </motion.h1>
+                <p className="text-lg opacity-80">mint. activate. have fun.</p>
 
-        {loading && <Spinner />}
+                {/* Updated Stats */}
+                <div className="flex justify-center gap-4 text-sm opacity-70">
+                  <span>
+                    {currentSupply} / {TOTAL_SUPPLY} minted
+                  </span>
+                  <span>{activatedWalls.length} active</span>
+                  <span>{totalInactiveWalls} inactive</span>
+                </div>
+              </div>
 
-        {!loading && (
-          <>
-            {/* mint button */}
-            {registryMinted < TOTAL_SUPPLY && (
-              <MintBanner
-                remaining={TOTAL_SUPPLY - registryMinted}
-                onMint={mintWall}
-              />
-            )}
+              {/* Show activation status feedback */}
+              {activationState.status === "creating_cast" && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="bg-yellow-900/20 border border-yellow-500 rounded-lg p-4 text-center"
+                >
+                  <div className="text-yellow-400 font-semibold text-lg mb-2">
+                    ✍️ Step 1/2: Creating your cast...
+                  </div>
+                  <div className="text-sm opacity-80">
+                    Please complete the cast creation in Warpcast
+                  </div>
+                  <div className="flex justify-center mt-2">
+                    <motion.div
+                      animate={{ rotate: 360 }}
+                      transition={{
+                        duration: 1,
+                        repeat: Infinity,
+                        ease: "linear",
+                      }}
+                      className="w-4 h-4 border-2 border-yellow-400 border-t-transparent rounded-full"
+                    />
+                  </div>
+                </motion.div>
+              )}
 
-            {/* walls or marketplace */}
-            {showMarket ? (
-              market.length ? (
-                market.map((w) => (
-                  <WallCard key={w.pubkey} wall={w} market buyWall={buyWall} />
-                ))
-              ) : (
-                <Empty msg="No walls listed for sale" />
-              )
-            ) : walls.length ? (
-              walls.map((w) => (
-                <WallCard
-                  key={w.pubkey}
-                  wall={w}
-                  activateWall={activateWall}
-                  listWall={listWall}
-                  unlistWall={unlistWall}
-                  priceInput={priceInput}
-                  setPriceInput={setPriceInput}
-                  selectedWall={selectedWall}
-                  setSelectedWall={setSelectedWall}
+              {activationState.status === "pending_activation" && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="bg-blue-900/20 border border-blue-500 rounded-lg p-4 text-center"
+                >
+                  <div className="text-blue-400 font-semibold text-lg mb-2">
+                    {context?.location?.type === "cast_embed" &&
+                    context?.user?.fid === context?.location?.cast?.fid
+                      ? "🎯 Activating with this cast..."
+                      : "⛓️ Step 2/2: Activating on blockchain..."}
+                  </div>
+                  <div className="text-sm opacity-80">
+                    Confirming your transaction on Solana
+                  </div>
+                  <div className="flex justify-center mt-2">
+                    <motion.div
+                      animate={{ rotate: 360 }}
+                      transition={{
+                        duration: 1,
+                        repeat: Infinity,
+                        ease: "linear",
+                      }}
+                      className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full"
+                    />
+                  </div>
+                </motion.div>
+              )}
+
+              {activationState.status === "success" && (
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.8 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  className="bg-green-900/20 border border-green-500 rounded-lg p-4 text-center"
+                >
+                  <div className="text-green-400 font-semibold text-lg mb-2">
+                    🎉 Wall activated successfully!
+                  </div>
+                  <a
+                    href={`https://solscan.io/tx/${activationState.signature}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-blue-400 underline text-sm hover:text-blue-300"
+                  >
+                    View transaction on Solscan
+                  </a>
+                </motion.div>
+              )}
+
+              {activationState.status === "error" && (
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.8 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  className="bg-red-900/20 border border-red-500/30 rounded-lg p-4"
+                >
+                  <div className="text-red-400 font-semibold text-lg mb-2">
+                    ❌ Activation Failed
+                  </div>
+                  <div className="text-red-300 text-sm leading-relaxed mb-3">
+                    {activationState.error}
+                  </div>
+                  <div className="flex gap-2 justify-center">
+                    <button
+                      onClick={initiateActivation}
+                      className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded text-sm font-medium transition-colors"
+                    >
+                      🔄 Try Again
+                    </button>
+                    <button
+                      onClick={() => setActivationState({ status: "idle" })}
+                      className="px-4 py-2 bg-gray-600 hover:bg-gray-700 rounded text-sm font-medium transition-colors"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+
+              {/* Show success message after minting */}
+              {mintState.status === "success" && (
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.8 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  className="bg-green-900/20 border border-green-500 rounded-lg p-4 text-center"
+                >
+                  <div className="text-green-400 font-semibold text-lg mb-2">
+                    🎉 Wall #{currentSupply} minted successfully!
+                  </div>
+                  <div className="text-sm opacity-80">
+                    Now activate it to make it live! 👇
+                  </div>
+                </motion.div>
+              )}
+
+              <p>this system was not prepared for the load that it received.</p>
+              <p>the interface will be reworked in the next few days.</p>
+              <p>
+                add the app to farcaster to get a notification with next steps.
+              </p>
+              <StayTunedButton onClick={() => sdk.actions.addMiniApp()} />
+
+              <p className="text-xs">
+                (if you havent minted do it with the button down here)
+              </p>
+            </motion.div>
+          )}
+
+          {currentView === "mint" && (
+            <motion.div
+              key="mint"
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+              transition={{ duration: 0.3 }}
+              className="p-6 space-y-6 flex flex-col justify-center min-h-full"
+            >
+              <div className="text-center space-y-6">
+                <div className="text-6xl">🧱</div>
+                <h2 className="text-3xl font-bold">Mint Your Wall</h2>
+                <p className="text-lg opacity-80">
+                  Own a piece of the blockchain
+                  <br />
+                  {MINT_PRICE_SOL} SOL per wall
+                </p>
+
+                <div className="bg-gray-800 p-4 rounded-lg">
+                  <div className="text-sm opacity-70 mb-2">Your Balance</div>
+                  <div className="text-2xl font-bold">
+                    {walletBalance.toFixed(4)} SOL
+                  </div>
+                </div>
+
+                {mintState.status === "success" && (
+                  <motion.div
+                    initial={{ opacity: 0, scale: 0.8 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    className="text-center space-y-4"
+                  >
+                    <div className="text-green-400 font-semibold text-lg">
+                      ✅ Wall #{currentSupply} minted successfully!
+                    </div>
+                    <div className="text-sm opacity-80">
+                      Now go to gallery and activate it! 🚀
+                    </div>
+                    <a
+                      href={`https://solscan.io/tx/${mintState.signature}`}
+                      target="_blank"
+                      className="text-blue-400 underline text-sm"
+                    >
+                      View transaction
+                    </a>
+                  </motion.div>
+                )}
+
+                {mintState.status === "error" && (
+                  <motion.div
+                    initial={{ opacity: 0, scale: 0.8 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    className="text-red-400 text-center bg-red-900/20 p-4 rounded-lg"
+                  >
+                    {mintState.error.message}
+                  </motion.div>
+                )}
+              </div>
+            </motion.div>
+          )}
+
+          {currentView === "profile" && (
+            <motion.div
+              key="profile"
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+              transition={{ duration: 0.3 }}
+              className="p-6 space-y-6"
+            >
+              <div className="text-center space-y-4">
+                <img
+                  src={context?.user?.pfpUrl || "/fallback-pfp.png"}
+                  alt="Your profile"
+                  className="w-20 h-20 rounded-full mx-auto ring-4 ring-purple-500/50"
                 />
-              ))
-            ) : (
-              <Empty msg="You don't own any walls yet" />
-            )}
-          </>
-        )}
-      </main>
-    </div>
+                <h2 className="text-2xl font-bold">Your Frick</h2>
+
+                <div className="grid grid-cols-3 gap-4 text-center">
+                  <p>
+                    here you would see the people that have written on your
+                    frick and what
+                  </p>
+                  <p>
+                    you can also sell your frick on the marketplace that is
+                    embedded on the smart contract
+                  </p>
+                  <Button
+                    onClick={() => {
+                      console.log(
+                        "time to sell wall",
+                        wall?.pda || userWallState.pda
+                      );
+                    }}
+                  >
+                    Sell Frick
+                  </Button>
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+
+      {/* Fixed Bottom Action Button */}
+      <div className="fixed bottom-0 left-0 right-0 bg-gray-900/95 backdrop-blur-sm border-t border-gray-800 p-4">
+        <motion.button
+          onClick={primaryAction.action}
+          disabled={primaryAction.disabled}
+          className={`w-full py-4 rounded-lg font-bold text-lg transition-all duration-200 ${primaryAction.color} disabled:opacity-50 disabled:cursor-not-allowed`}
+          whileHover={{ scale: primaryAction.disabled ? 1 : 1.02 }}
+          whileTap={{ scale: primaryAction.disabled ? 1 : 0.98 }}
+        >
+          {primaryAction.text}
+        </motion.button>
+      </div>
+    </motion.div>
   );
-};
-
-export default App;
-
-// ──────────────────────────────────────────────────────────
-// Small presentational components
-// (all purely visual – no state, no hooks)
-// ──────────────────────────────────────────────────────────
-const Header = ({ toggleMarket }: { toggleMarket: () => void }) => (
-  <div className="relative w-full h-24 overflow-hidden bg-gradient-to-r from-purple-500 via-pink-500 to-red-500">
-    <div
-      className="absolute inset-0 bg-[radial-gradient(circle,_transparent_20%,_#8b5cf6_20%,_#8b5cf6_30%,_transparent_30%,_transparent_40%,_#d946ef_40%,_#d946ef_50%,_transparent_50%,_transparent_60%,_#ec4899_60%,_#ec4899_70%,_transparent_70%)] bg-opacity-30"
-      style={{ backgroundSize: "20px 20px" }}
-    />
-    <div className="relative flex items-center justify-center h-full">
-      <h1 className="text-4xl font-bold text-white tracking-wider">
-        Wallcaster
-      </h1>
-    </div>
-    <button
-      onClick={toggleMarket}
-      className="absolute top-4 right-4 p-2 bg-white rounded-full shadow hover:shadow-lg"
-    >
-      <ShoppingBag className="h-6 w-6 text-purple-600" />
-    </button>
-  </div>
-);
-
-const ScreenCenter: React.FC<{ children: React.ReactNode }> = ({
-  children,
-}) => (
-  <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50">
-    {children}
-  </div>
-);
-
-const Spinner = () => (
-  <div className="text-center py-8">
-    <div className="w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-    <p className="text-gray-500">Loading…</p>
-  </div>
-);
-
-const Toast: React.FC<{
-  ok?: boolean;
-  onClose: () => void;
-  children: React.ReactNode;
-}> = ({ ok, onClose, children }) => (
-  <div
-    className={`mb-4 p-3 rounded flex items-center ${
-      ok ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"
-    }`}
-  >
-    {ok ? (
-      <Check className="w-5 h-5 mr-2" />
-    ) : (
-      <AlertCircle className="w-5 h-5 mr-2" />
-    )}
-    {children}
-    <button onClick={onClose} className="ml-auto">
-      <X className="w-4 h-4" />
-    </button>
-  </div>
-);
-
-const Empty = ({ msg }: { msg: string }) => (
-  <div className="text-center py-8 text-gray-500">{msg}</div>
-);
-
-const MintBanner = ({
-  remaining,
-  onMint,
-}: {
-  remaining: number;
-  onMint: () => void;
-}) => (
-  <div className="mb-6 text-center">
-    <button
-      onClick={onMint}
-      className="mb-2 px-6 py-3 bg-purple-600 text-white rounded-lg shadow hover:bg-purple-700"
-    >
-      Mint Wall (0.0069 SOL)
-    </button>
-    <div className="text-xs text-purple-600">
-      supply – {remaining} / {TOTAL_SUPPLY} remaining
-    </div>
-  </div>
-);
-
-interface CardProps {
-  wall: WallUI;
-  market?: boolean;
-  buyWall?: (w: WallUI) => void;
-  activateWall?: (pk: string) => void;
-  listWall?: (pk: string, price: number) => void;
-  unlistWall?: (pk: string) => void;
-  selectedWall?: string | null;
-  setSelectedWall?: (pk: string | null) => void;
-  priceInput?: string;
-  setPriceInput?: (v: string) => void;
 }
 
-const WallCard: React.FC<CardProps> = ({
-  wall,
-  market,
-  buyWall,
-  activateWall,
-  listWall,
-  unlistWall,
-  selectedWall,
-  setSelectedWall,
-  priceInput,
-  setPriceInput,
-}) => {
-  const isSelected = selectedWall === wall.pubkey;
-  return (
-    <div
-      className={`p-4 mb-4 rounded border ${
-        wall.listed
-          ? "border-green-400 bg-green-50"
-          : "border-gray-200 bg-white"
-      }`}
-    >
-      <div className="flex justify-between mb-2">
-        <h3 className="font-medium">Wall #{wall.id}</h3>
-        {wall.listed && <Tag className="h-4 w-4 text-green-600" />}
+/* ————— helpers ————— */
+const splash = (msg: string) => (
+  <div className="h-screen w-screen flex items-center justify-center bg-gray-900 text-white">
+    <div className="text-center space-y-4">
+      <div className="text-6xl">🧱</div>
+      <div>{msg}</div>
+      <div>
+        <a
+          href="https://farcaster.xyz/jpfraneto.eth/0x81e09a78"
+          target="_blank"
+        >
+          fricks.lat
+        </a>
       </div>
-
-      <p className="text-sm text-gray-600 mb-1">
-        Owner: {wall.owner.slice(0, 4)}…{wall.owner.slice(-4)}
-      </p>
-
-      {wall.listed && (
-        <p className="text-sm font-medium text-green-600 mb-2">
-          Listed: {wall.priceSol} SOL
-        </p>
-      )}
-
-      <p className="text-xs text-gray-500 truncate mb-3">
-        Hash:{" "}
-        {wall.castHash ? wall.castHash.slice(0, 18) + "…" : "Not activated"}
-      </p>
-
-      {/* action buttons */}
-      <div className="flex justify-end space-x-2">
-        {market ? (
-          <button
-            onClick={() => buyWall?.(wall)}
-            className="px-3 py-1 text-xs bg-green-100 text-green-700 rounded hover:bg-green-200"
-          >
-            Buy for {wall.priceSol} SOL
-          </button>
-        ) : wall.listed ? (
-          <button
-            onClick={() => unlistWall?.(wall.pubkey)}
-            className="px-3 py-1 text-xs bg-red-100 text-red-700 rounded hover:bg-red-200"
-          >
-            Unlist
-          </button>
-        ) : (
-          <>
-            {!wall.castHash ||
-            wall.castHash ===
-              "0000000000000000000000000000000000000000000000000000000000000000" ? (
-              <button
-                onClick={() => activateWall?.(wall.pubkey)}
-                className="px-3 py-1 text-xs bg-purple-100 text-purple-700 rounded hover:bg-purple-200"
-              >
-                Activate
-              </button>
-            ) : null}
-
-            <button
-              onClick={() => setSelectedWall?.(isSelected ? null : wall.pubkey)}
-              className="px-3 py-1 text-xs bg-blue-100 text-blue-700 rounded hover:bg-blue-200"
-            >
-              List
-            </button>
-          </>
-        )}
-      </div>
-
-      {/* list price input */}
-      {isSelected && (
-        <div className="mt-3 p-3 bg-gray-50 rounded border">
-          <input
-            type="number"
-            placeholder="Price in SOL"
-            value={priceInput}
-            onChange={(e) => setPriceInput?.(e.target.value)}
-            className="w-full mb-2 px-2 py-1 text-sm border rounded"
-            min="0.01"
-            step="0.01"
-          />
-          <div className="flex justify-end space-x-2">
-            <button
-              onClick={() => setSelectedWall?.(null)}
-              className="px-2 py-1 text-xs bg-gray-200 rounded hover:bg-gray-300"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={() => {
-                const p = parseFloat(priceInput || "0");
-                if (p > 0) listWall?.(wall.pubkey, p);
-              }}
-              className="px-2 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600"
-            >
-              Confirm
-            </button>
-          </div>
-        </div>
-      )}
     </div>
-  );
-};
+  </div>
+);

@@ -1,6 +1,6 @@
 {
-  "domain": "wallcaster",
-  "buildCommand": "npm run build",
-  "buildDir": "dist",
-  "siteId": "305b8929-bb98-43ac-9d76-7d074c6e190c"
+  "siteId": "8c00c343-839d-4e27-816e-db19336a8935",
+  "domain": "fricks",
+  "buildCommand": "bun run build",
+  "buildDir": "dist"
 }

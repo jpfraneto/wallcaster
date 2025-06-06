@@ -17,6 +17,7 @@ export type WallAccount = {
   owner: PublicKey;
   castHash: string | null; // hex string or null
   activated: boolean;
+  state: "Listed" | "Active" | "Inactive" | "Sold";
 };
 
 /**
@@ -28,30 +29,70 @@ export async function getWallByOwner(
   programId: PublicKey,
   wallet: PublicKey
 ): Promise<WallAccount | null> {
-  const filters: GetProgramAccountsFilter[] = [
-    {
-      memcmp: {
-        /** compare the 32-byte owner field */
-        offset: OWNER_OFFSET,
-        bytes: wallet.toBase58(),
+  console.log("🔍 Searching for wall owned by:", wallet.toBase58());
+  console.log("🔑 Using program ID:", programId.toBase58());
+
+  try {
+    const filters: GetProgramAccountsFilter[] = [
+      {
+        memcmp: {
+          /** compare the 32-byte owner field */
+          offset: OWNER_OFFSET,
+          bytes: wallet.toBase58(),
+        },
       },
-    },
-  ];
+    ];
 
-  const [account] = await connection.getProgramAccounts(programId, { filters });
+    console.log("🔧 Applying filters:", JSON.stringify(filters));
+    const accounts = await connection.getProgramAccounts(programId, {
+      filters,
+    });
+    console.log(`🔍 Found ${accounts.length} accounts matching filter`);
 
-  if (!account) return null;
+    const [account] = accounts;
 
-  const data = account.account.data;
-  const castHashBuf = data.subarray(CAST_HASH_OFFSET, CAST_HASH_OFFSET + 32);
-  const activatedFlag = data[ACTIVATED_OFFSET];
+    if (!account) {
+      console.log("❌ No wall found for this wallet");
+      return null;
+    }
 
-  return {
-    pda: account.pubkey,
-    owner: wallet,
-    castHash: castHashBuf.some((b) => b !== 0)
-      ? Buffer.from(castHashBuf).toString("hex")
-      : null,
-    activated: Boolean(activatedFlag),
-  };
+    console.log("✅ Wall found:", account.pubkey.toBase58());
+
+    try {
+      const data = account.account.data;
+      const castHashBuf = data.subarray(
+        CAST_HASH_OFFSET,
+        CAST_HASH_OFFSET + 32
+      );
+      const activatedFlag = data[ACTIVATED_OFFSET];
+
+      const wallAccount: WallAccount = {
+        pda: account.pubkey,
+        owner: wallet,
+        castHash: castHashBuf.some((b) => b !== 0)
+          ? Buffer.from(castHashBuf).toString("hex")
+          : null,
+        activated: Boolean(activatedFlag),
+        state: Boolean(activatedFlag) ? "Active" : "Inactive",
+      };
+
+      console.log("🧱 Wall details:", {
+        pda: wallAccount.pda.toBase58(),
+        owner: wallAccount.owner.toBase58(),
+        activated: wallAccount.activated,
+        hasCastHash: wallAccount.castHash !== null,
+        state: wallAccount.activated ? "Active" : "Inactive",
+      });
+
+      return wallAccount;
+    } catch (err: any) {
+      console.error("❌ Error parsing wall account data:", err);
+      throw new Error(`Failed to parse wall account data: ${err.message}`);
+    }
+  } catch (err: any) {
+    console.error("❌ Error fetching wall account:", err);
+    throw new Error(
+      `Failed to fetch wall for owner ${wallet.toBase58()}: ${err.message}`
+    );
+  }
 }
